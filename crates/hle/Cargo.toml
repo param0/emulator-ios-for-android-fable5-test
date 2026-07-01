@@ -1,0 +1,16 @@
+[package]
+name = "ios-emu-hle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "ios_emu_hle"
+path = "src/lib.rs"
+
+[dependencies]
+ios-emu-common = { path = "../common" }
+ios-emu-memory = { path = "../memory" }
+ios-emu-core = { path = "../core" }
+log.workspace = true

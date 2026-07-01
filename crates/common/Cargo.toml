@@ -1,0 +1,13 @@
+[package]
+name = "ios-emu-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "ios_emu_common"
+path = "src/lib.rs"
+
+[dependencies]
+log.workspace = true

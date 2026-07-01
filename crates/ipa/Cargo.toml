@@ -1,0 +1,16 @@
+[package]
+name = "ios-emu-ipa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "ios_emu_ipa"
+path = "src/lib.rs"
+
+[dependencies]
+ios-emu-common = { path = "../common" }
+log.workspace = true
+# Only the deflate codec is needed to read Info.plist / the icon out of an IPA.
+zip = { version = "0.6", default-features = false, features = ["deflate"] }

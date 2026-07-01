@@ -1,0 +1,20 @@
+# Cross-compilation configuration for the Android device targets.
+#
+# Point the linkers at the NDK's clang wrappers. `<API>` is the minimum
+# supported Android API level (24 = Android 7.0, the floor for reliable
+# 64-bit-only execution and `mmap` with `PROT_EXEC` from app storage).
+#
+# Uncomment and set `ANDROID_NDK_HOME` (or expand the paths) before building
+# the `ios-emu-jni` cdylib for a device. Host builds/tests do not need these.
+#
+# [target.aarch64-linux-android]
+# ar = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+# linker = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+#
+# [target.x86_64-linux-android]
+# ar = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+# linker = "${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang"
+
+[alias]
+# Convenience: build only the host-testable crates.
+xtest = "test -p ios-emu-loader -p ios-emu-ipa -p ios-emu-vfs -p ios-emu-memory -p ios-emu-common"

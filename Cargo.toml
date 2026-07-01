@@ -1,0 +1,51 @@
+# Workspace manifest for the iOS 7 (AArch64) emulator core.
+#
+# The workspace is decomposed into small, single-responsibility crates so that
+# new syscalls, frameworks, or iOS-version behaviours can be added without
+# touching the core execution loop. The dependency graph is a strict DAG:
+#
+#   common  <- {memory, loader, vfs, ipa}
+#   memory  <- core
+#   loader  <- core
+#   vfs     <- core
+#   core    <- hle
+#   {core, hle, ipa, ...} <- jni  (the Android-facing cdylib)
+#
+# `common` never depends on anything above it, which keeps the leaf crates
+# (loader, plist parser, ...) trivially unit-testable on the host.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/memory",
+    "crates/loader",
+    "crates/vfs",
+    "crates/ipa",
+    "crates/core",
+    "crates/hle",
+    "crates/jni",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+authors = ["iOS-on-Android Emulator Project"]
+repository = "https://example.invalid/ios-emu"
+
+[workspace.dependencies]
+log = "0.4"
+
+# Release profile tuned for on-device execution: aggressive inlining across
+# crate boundaries matters because the syscall dispatcher is on the hot path.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

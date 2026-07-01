@@ -1,0 +1,17 @@
+[package]
+name = "ios-emu-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "ios_emu_core"
+path = "src/lib.rs"
+
+[dependencies]
+ios-emu-common = { path = "../common" }
+ios-emu-memory = { path = "../memory" }
+ios-emu-loader = { path = "../loader" }
+ios-emu-vfs = { path = "../vfs" }
+log.workspace = true

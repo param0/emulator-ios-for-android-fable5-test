@@ -1,0 +1,22 @@
+# Rust
+/target
+**/target
+# Cargo.lock is committed: this workspace produces applications/cdylibs, so a
+# pinned dependency graph is desirable for reproducible device builds.
+
+# Android / Gradle
+/frontend/.gradle
+/frontend/build
+/frontend/app/build
+/frontend/local.properties
+/frontend/.idea
+*.iml
+/frontend/app/.cxx
+
+# Native build
+/native/build
+/native/cmake-build-*
+
+# Editors / OS
+.DS_Store
+*.swp

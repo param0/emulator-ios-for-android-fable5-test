@@ -1,0 +1,39 @@
+[package]
+name = "ios-emu-jni"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "ios_emu_jni"
+path = "src/lib.rs"
+# `cdylib` produces the `libios_emu_jni.so` the Android app loads; `rlib` lets
+# the host test-suite link the orchestration layer.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ios-emu-common = { path = "../common" }
+ios-emu-memory = { path = "../memory" }
+ios-emu-loader = { path = "../loader" }
+ios-emu-vfs = { path = "../vfs" }
+ios-emu-ipa = { path = "../ipa" }
+ios-emu-core = { path = "../core" }
+ios-emu-hle = { path = "../hle" }
+log.workspace = true
+
+# The JNI + Android logger bindings are only needed on device; gating them
+# behind a feature keeps `cargo test` on the host dependency-free.
+jni = { version = "0.21", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = { version = "0.13", optional = true }
+
+[features]
+default = []
+android = ["dep:jni", "dep:android_logger"]
+
+# Compiles the native C backend (`native/src/*.c`) into the cdylib, but only when
+# targeting Android — host builds/tests skip it entirely (see build.rs).
+[build-dependencies]
+cc = "1.0"

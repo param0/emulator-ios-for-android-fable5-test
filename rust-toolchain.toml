@@ -1,0 +1,8 @@
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# Android device targets are added on demand by the build script rather than
+# pinned here, so that host-side unit tests (loader / plist / vfs) build with a
+# plain `cargo test` and no rustup target downloads:
+#
+#   rustup target add aarch64-linux-android x86_64-linux-android
