@@ -1,6 +1,7 @@
 package com.iosemu.emulator.ui
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,6 +19,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -26,10 +28,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -40,50 +42,95 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.iosemu.emulator.AppManager
+import com.iosemu.emulator.emu.EmulatorBridge
 import com.iosemu.emulator.model.AppEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import java.io.File
 
 /**
- * The single-screen launcher: renders a grid of discovered iOS apps and boots
- * the tapped one on a background thread. All native work (scan, icon decode,
- * launch) is dispatched off the main thread.
+ * Single-screen launcher: scans the IPA directory via the native core, shows the
+ * apps in a grid, and boots the tapped app on a background thread.
  */
 class MainActivity : ComponentActivity() {
+
+    /** Where users drop .ipa files (app-specific external dir — no permission). */
+    private val ipaDir: File by lazy {
+        File(getExternalFilesDir(null), "IPAs").apply { mkdirs() }
+    }
+
+    /** Per-app sandbox containers and the shared read-only system image. */
+    private val containersRoot: File by lazy { File(filesDir, "Containers").apply { mkdirs() } }
+    private val systemRoot: File by lazy { File(filesDir, "System").apply { mkdirs() } }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val manager = AppManager(this)
         setContent {
             MaterialTheme {
-                AppGridScreen(manager)
+                AppGridScreen(
+                    ipaDir = ipaDir,
+                    scan = { EmulatorBridge.nativeScan(ipaDir.absolutePath).parseApps() },
+                    icon = { entry -> entry.decodeIcon() },
+                    launch = { entry ->
+                        EmulatorBridge.nativeLaunch(
+                            entry.ipaPath,
+                            containersRoot.absolutePath,
+                            systemRoot.absolutePath,
+                        )
+                    },
+                )
             }
         }
     }
+
+    /** Decode the primary icon PNG for [entry] via the native bridge. */
+    private fun AppEntry.decodeIcon(): Bitmap? {
+        if (!hasIcon) return null
+        val bytes = EmulatorBridge.nativeIcon(ipaPath)
+        if (bytes.isEmpty()) return null
+        return runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+    }
 }
 
+/** Parse the JSON array returned by [EmulatorBridge.nativeScan] into models. */
+private fun String.parseApps(): List<AppEntry> {
+    val arr = runCatching { JSONArray(this) }.getOrNull() ?: return emptyList()
+    return (0 until arr.length()).map { i ->
+        val o = arr.getJSONObject(i)
+        AppEntry(
+            name = o.optString("name").ifBlank { "Untitled" },
+            bundleId = o.optString("bundleId"),
+            minOs = o.optString("minOs"),
+            ipaPath = o.optString("ipaPath"),
+            hasIcon = o.optBoolean("hasIcon", false),
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppGridScreen(manager: AppManager) {
+private fun AppGridScreen(
+    ipaDir: File,
+    scan: () -> List<AppEntry>,
+    icon: (AppEntry) -> Bitmap?,
+    launch: (AppEntry) -> Int,
+) {
     val apps = remember { mutableStateListOf<AppEntry>() }
     val icons = remember { mutableStateMapOf<String, Bitmap?>() }
-    var status by remember { mutableStateOf("Scanning ${manager.ipaDirectory.name}…") }
+    var status by remember { mutableStateOf("Scanning ${ipaDir.name}…") }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    // Initial (and only automatic) scan.
     LaunchedEffect(Unit) {
-        val found = withContext(Dispatchers.IO) { manager.scan() }
+        val found = withContext(Dispatchers.IO) { scan() }
         apps.clear()
         apps.addAll(found)
-        status = if (found.isEmpty()) {
-            "No .ipa files in ${manager.ipaDirectory.absolutePath}"
-        } else {
-            "${found.size} app(s)"
-        }
-        // Decode icons lazily in the background.
+        status = if (found.isEmpty()) "No .ipa files in ${ipaDir.absolutePath}"
+        else "${found.size} app(s)"
         found.forEach { entry ->
-            withContext(Dispatchers.IO) { icons[entry.ipaPath] = manager.icon(entry) }
+            withContext(Dispatchers.IO) { icons[entry.ipaPath] = icon(entry) }
         }
     }
 
@@ -104,7 +151,7 @@ private fun AppGridScreen(manager: AppManager) {
                 AppTile(entry, icons[entry.ipaPath]) {
                     scope.launch {
                         snackbar.showSnackbar("Launching ${entry.name}…")
-                        val code = withContext(Dispatchers.IO) { manager.launch(entry) }
+                        val code = withContext(Dispatchers.IO) { launch(entry) }
                         snackbar.showSnackbar("${entry.name} exited with code $code")
                     }
                 }

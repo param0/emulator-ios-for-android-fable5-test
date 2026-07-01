@@ -7,7 +7,11 @@ use std::path::PathBuf;
 
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os != "android" {
+    // Only build the native backend for the real device cdylib: an Android target
+    // *and* the `android` feature. This keeps host tests and bare
+    // `cargo check --target aarch64-linux-android` free of any C toolchain need.
+    let android_feature = std::env::var("CARGO_FEATURE_ANDROID").is_ok();
+    if target_os != "android" || !android_feature {
         return;
     }
 

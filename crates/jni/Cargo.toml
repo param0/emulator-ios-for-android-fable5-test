@@ -22,8 +22,8 @@ ios-emu-core = { path = "../core" }
 ios-emu-hle = { path = "../hle" }
 log.workspace = true
 
-# The JNI + Android logger bindings are only needed on device; gating them
-# behind a feature keeps `cargo test` on the host dependency-free.
+# JNI + logcat bindings are only needed on device; gating them behind a feature
+# keeps `cargo test` on the host dependency-free.
 jni = { version = "0.21", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -33,7 +33,7 @@ android_logger = { version = "0.13", optional = true }
 default = []
 android = ["dep:jni", "dep:android_logger"]
 
-# Compiles the native C backend (`native/src/*.c`) into the cdylib, but only when
+# Compiles the native C backend (native/src/*.c) into the cdylib, but only when
 # targeting Android — host builds/tests skip it entirely (see build.rs).
 [build-dependencies]
 cc = "1.0"

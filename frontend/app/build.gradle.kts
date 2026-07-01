@@ -1,7 +1,6 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("org.mozilla.rust-android-gradle.rust-android")
 }
 
 android {
@@ -15,16 +14,19 @@ android {
         versionCode = 1
         versionName = "0.1.0"
 
-        // 64-bit only — the emulator core executes AArch64 guest code natively.
+        // 64-bit only — the core executes AArch64 guest code natively.
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            abiFilters += "arm64-v8a"
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 
@@ -43,22 +45,44 @@ android {
         kotlinCompilerExtensionVersion = "1.5.14"
     }
 
-    // The native C backend (jit_exec.c / vm_bridge.c) is compiled and statically
-    // linked into the Rust cdylib by the crate's build.rs, so no separate
-    // externalNativeBuild block is required here.
+    // The .so files produced by cargo-ndk land here and are packaged into the APK.
+    sourceSets["main"].jniLibs.srcDir(layout.buildDirectory.dir("rustJniLibs"))
 }
 
-// Configure the Rust build: produce `libios_emu_jni.so` for arm64 with the
-// `android` feature (JNI + logcat) enabled, in release mode.
-cargo {
-    module = "../.."                 // path to the Cargo workspace root
-    libname = "ios_emu_jni"
-    targets = listOf("arm64")
-    profile = "release"
-    features {
-        defaultAnd(arrayOf("android"))
-    }
-    prebuiltToolchains = true
+// ---------------------------------------------------------------------------
+// cargo-ndk: cross-compile the Rust `ios-emu-jni` crate (which statically links
+// the native C backend via its build.rs) into `libios_emu_jni.so` for arm64-v8a.
+//
+// Prerequisites on the build machine:
+//   * Android NDK (ANDROID_NDK_HOME / ndkVersion)
+//   * `rustup target add aarch64-linux-android`
+//   * `cargo install cargo-ndk`
+//
+// cargo-ndk writes `<out>/arm64-v8a/libios_emu_jni.so`, exactly the layout the
+// jniLibs source set expects.
+// ---------------------------------------------------------------------------
+val workspaceRoot: File = rootProject.projectDir.parentFile // repo root (holds Cargo.toml)
+val rustJniLibs = layout.buildDirectory.dir("rustJniLibs")
+
+val cargoNdkBuild by tasks.registering(Exec::class) {
+    group = "rust"
+    description = "Build the Rust cdylib for arm64-v8a with cargo-ndk"
+    workingDir = workspaceRoot
+    outputs.dir(rustJniLibs)
+
+    commandLine(
+        "cargo", "ndk",
+        "-t", "arm64-v8a",
+        "-o", rustJniLibs.get().asFile.absolutePath,
+        "build", "--release",
+        "-p", "ios-emu-jni",
+        "--features", "android",
+    )
+}
+
+// Ensure the native library exists before the APK is assembled.
+tasks.named("preBuild").configure {
+    dependsOn(cargoNdkBuild)
 }
 
 dependencies {
@@ -71,17 +95,6 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-core")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
-}
-
-// Ensure the Rust/native library is built before the APK is assembled.
-tasks.matching { it.name.matches(Regex("merge.*JniLibFolders")) }.configureEach {
-    dependsOn(tasks.named("cargoBuild"))
-}
-tasks.whenTaskAdded {
-    if (name == "javaPreCompileDebug" || name == "javaPreCompileRelease") {
-        dependsOn("cargoBuild")
-    }
 }

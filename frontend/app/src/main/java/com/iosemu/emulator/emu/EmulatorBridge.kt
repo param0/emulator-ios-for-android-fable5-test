@@ -1,16 +1,14 @@
 package com.iosemu.emulator.emu
 
 /**
- * JNI facade over the Rust emulator core (`libios_emu_jni.so`).
+ * JNI facade over the Rust core (`libios_emu_jni.so`, built by cargo-ndk).
  *
  * The native library is produced from the `ios-emu-jni` crate and statically
- * absorbs the C AArch64 backend. All methods are thin marshallers:
+ * absorbs the C AArch64 backend. Each method is a thin marshaller:
  *  - [nativeScan] returns a JSON array of app descriptors,
- *  - [nativeIcon] returns raw PNG bytes for one IPA,
+ *  - [nativeIcon] returns raw PNG bytes for one IPA (empty if none),
  *  - [nativeLaunch] boots an app and blocks until it exits, returning the exit
- *    code (negative values indicate a host-side failure before/at load).
- *
- * These are declared `external`; the Kotlin-facing API lives in [AppManager].
+ *    code (negative values indicate a host-side failure at/ before load).
  */
 object EmulatorBridge {
 
