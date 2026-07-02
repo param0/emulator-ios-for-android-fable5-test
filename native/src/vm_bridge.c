@@ -77,6 +77,20 @@ int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot) {
     return mprotect((void *)(uintptr_t)addr, len, to_mmap_prot(prot));
 }
 
+/*
+ * Flush the instruction cache for [addr, addr+len) after writing code there and
+ * marking it executable. ARM64 I-cache and D-cache are NOT coherent: freshly
+ * stored instructions sit in the D-cache while the I-cache fetches stale bytes,
+ * which faults as SIGILL/ILL_ILLOPC. __builtin___clear_cache emits the required
+ * publish sequence (dc cvau over the range, dsb ish, ic ivau, dsb ish, isb).
+ * Call after copying/patching loaded __TEXT and after filling the __stubs page,
+ * strictly before the first jump into that code.
+ */
+void ios_emu_native_flush_icache(uint64_t addr, size_t len) {
+    char *begin = (char *)(uintptr_t)addr;
+    __builtin___clear_cache(begin, begin + len);
+}
+
 /* Release the whole reservation at teardown. */
 int ios_emu_native_unmap(uint64_t addr, size_t len) {
     return munmap((void *)(uintptr_t)addr, len);

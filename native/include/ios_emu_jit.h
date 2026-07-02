@@ -69,6 +69,23 @@ void ios_emu_native_set_trampoline_range(uint64_t lo, uint64_t hi);
 void ios_emu_native_prepare_text(void *addr, size_t len);
 
 /*
+ * Reserve `len` bytes of anonymous rw- memory at an OS-chosen base (no
+ * MAP_FIXED); aborts on failure. Backs the PIE image span and the stub page.
+ */
+void *ios_emu_native_map_region(size_t len);
+
+/* Apply the final protection (R/W/X bits) to a sub-range of a reservation. */
+int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot);
+
+/*
+ * Publish freshly-written code in [addr, addr+len) to the instruction cache
+ * (clean D-cache to PoU + invalidate I-cache). MUST be called after copying/
+ * patching an executable region and before the first jump into it, or the CPU
+ * fetches stale bytes and faults with SIGILL/ILL_ILLOPC.
+ */
+void ios_emu_native_flush_icache(uint64_t addr, size_t len);
+
+/*
  * Install `ctx` into the real CPU and resume guest execution at `ctx->pc` until
  * the next trap. On return the out-params carry the event payload and `ctx`
  * holds the guest state at the trap. Returns an `ios_emu_event` discriminant.

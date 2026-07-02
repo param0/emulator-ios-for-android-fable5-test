@@ -25,11 +25,14 @@ pub use region::{Region, RegionKind};
 use ios_emu_common::{align_up, EmuError, EmuResult, GuestAddr, Protection, PAGE_SIZE};
 use std::collections::BTreeMap;
 
-// The native mprotect wrapper (native/src/vm_bridge.c). On device, `protect`
-// forwards to it so W^X is enforced by the kernel, not merely tracked here.
+// Native backend hooks (native/src/vm_bridge.c). On device, `protect` forwards
+// the final protection to `mprotect` (so W^X is kernel-enforced) and, when the
+// region becomes executable, flushes the I-cache so freshly-written code is
+// coherent before execution — ARM64 I/D caches are not.
 #[cfg(target_os = "android")]
 extern "C" {
     fn ios_emu_native_protect(addr: u64, len: usize, prot: u32) -> i32;
+    fn ios_emu_native_flush_icache(addr: u64, len: usize);
 }
 
 /// The full emulated address space for one iOS process.
@@ -143,6 +146,15 @@ impl GuestMemory {
             let rc = unsafe { ios_emu_native_protect(base, len, prot.0 as u32) };
             if rc != 0 {
                 return Err(EmuError::Memory { addr: base, reason: "native mprotect failed" });
+            }
+            // A region that just became executable may hold freshly-written code
+            // (loaded __TEXT, the BRK-filled __stubs page). Publish it to the
+            // I-cache now — before any jump into it — or the CPU fetches stale
+            // bytes and faults SIGILL. This is the single choke point through
+            // which every executable region passes.
+            if prot.contains(Protection::EXEC) {
+                // SAFETY: FFI cache-flush over the same owned, mapped range.
+                unsafe { ios_emu_native_flush_icache(base, len) };
             }
         }
         Ok(())
