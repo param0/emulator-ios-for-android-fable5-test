@@ -21,7 +21,13 @@ pub struct MachineConfig {
     pub heap_size: u64,
     pub stack_top: GuestAddr,
     pub stack_size: u64,
+    /// Host-only fallback base for the trampoline/stub page. On device this is
+    /// ignored: the region is reserved at an OS-chosen base via
+    /// `reserve_native_region` so the later `mprotect` to r-x targets real
+    /// memory.
     pub trampoline_base: GuestAddr,
+    /// Host-only fallback ASLR slide (0 = map at preferred). On device the slide
+    /// is derived from the image reservation base.
     pub slide: u64,
 }
 
@@ -64,6 +70,11 @@ pub struct Machine {
 }
 
 impl Machine {
+    /// Capacity reserved for the trampoline/stub page on device (16 B/stub, so
+    /// this holds ~64k distinct imports — far beyond any real binary).
+    #[cfg(target_os = "android")]
+    const TRAMPOLINE_RESERVE: u64 = 0x10_0000; // 1 MiB
+
     /// Construct a process from a Mach-O `bytes` image inside `vfs`, servicing
     /// HLE calls through `world`. Pass [`NullEnvironment`] to run with syscalls
     /// only (no frameworks).
@@ -94,11 +105,21 @@ impl Machine {
         #[cfg(not(target_os = "android"))]
         let slide = cfg.slide;
 
+        // Trampoline/stub page. It is written (BRK sleds), then `mprotect`ed to
+        // r-x, so on device it MUST be backed by a real OS reservation — a
+        // hardcoded address (0x500000000) that was never mmap'd makes the later
+        // mprotect fail. Reserve an OS-chosen base for a fixed capacity; on the
+        // host the configured address is fine (host-Vec-backed bookkeeping).
+        #[cfg(target_os = "android")]
+        let trampoline_base = crate::loader::reserve_native_region(Self::TRAMPOLINE_RESERVE)?;
+        #[cfg(not(target_os = "android"))]
+        let trampoline_base = cfg.trampoline_base;
+
         let layout = LayoutConfig {
             slide,
             stack_top: cfg.stack_top,
             stack_size: cfg.stack_size,
-            trampoline_base: cfg.trampoline_base,
+            trampoline_base,
             trampoline_stride: 16,
             argv0: format!("{}/Executable", vfs.bundle_ios_path()),
         };

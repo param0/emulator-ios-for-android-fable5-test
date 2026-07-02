@@ -235,31 +235,40 @@ pub fn resolve_entry(image: &MachOImage, slide: u64) -> EmuResult<GuestAddr> {
     }
 }
 
-/// Device path: reserve the image span via the C backend (OS-chosen base, no
-/// `MAP_FIXED`) and compute the ASLR slide from the returned base. The result
-/// feeds `LayoutConfig::slide` so segment mapping and [`resolve_entry`] relocate
-/// consistently.
+/// Device path: reserve `len` bytes of real, OS-chosen memory via the C backend
+/// (no `MAP_FIXED`) and return its base. Used for both the image span and the
+/// trampoline/stub page — any region that must later be `mprotect`ed on device
+/// has to be backed by a genuine reservation, or the `mprotect` fails.
 #[cfg(target_os = "android")]
 #[allow(unsafe_code)] // the sole FFI call into the native reservation backend
-pub fn reserve_image_and_slide(image: &MachOImage) -> EmuResult<(GuestAddr, u64)> {
+pub fn reserve_native_region(len: u64) -> EmuResult<GuestAddr> {
     extern "C" {
         // native/src/vm_bridge.c — aborts on failure, so a non-null return is
         // guaranteed here.
         fn ios_emu_native_map_region(len: usize) -> *mut core::ffi::c_void;
     }
-
-    let (preferred_base, len) = image_span(image);
-    // SAFETY: FFI into our own allocator; `len` is non-zero for any real image
-    // and the callee validates/aborts otherwise.
+    // SAFETY: FFI into our own allocator; the callee validates `len` and aborts
+    // rather than returning MAP_FAILED.
     let base = unsafe { ios_emu_native_map_region(len as usize) } as u64;
     if base == 0 {
         return Err(EmuError::Memory { addr: 0, reason: "native reservation returned null" });
     }
-    let slide = base.wrapping_sub(preferred_base);
+    Ok(GuestAddr(base))
+}
+
+/// Device path: reserve the image span and compute the ASLR slide from the
+/// returned base. Feeds `LayoutConfig::slide` so segment mapping and
+/// [`resolve_entry`] relocate consistently.
+#[cfg(target_os = "android")]
+pub fn reserve_image_and_slide(image: &MachOImage) -> EmuResult<(GuestAddr, u64)> {
+    let (preferred_base, len) = image_span(image);
+    let base = reserve_native_region(len)?;
+    let slide = base.raw().wrapping_sub(preferred_base);
     log::info!(
-        "PIE image: dynamic base {base:#x}, preferred {preferred_base:#x}, slide {slide:#x}"
+        "PIE image: dynamic base {} (preferred {preferred_base:#x}, slide {slide:#x})",
+        base
     );
-    Ok((GuestAddr(base), slide))
+    Ok((base, slide))
 }
 
 /// Write `argv`/`envp`/`apple` onto the stack and return `(sp, [argc, argv,
