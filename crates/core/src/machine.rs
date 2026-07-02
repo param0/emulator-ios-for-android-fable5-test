@@ -82,8 +82,20 @@ impl Machine {
         );
 
         let mut mem = GuestMemory::new(cfg.heap_base, cfg.heap_size)?;
+
+        // ASLR slide. On device, reserve the image span at an OS-chosen base (no
+        // MAP_FIXED — Android 16 blocks the preferred 0x100000000 range) and
+        // derive `slide = dynamic_base - preferred_base`; on the host there is no
+        // native reservation, so honour the configured slide (0 = map at
+        // preferred). Both segment placement (`seg.vmaddr + slide`) and
+        // `resolve_entry` relocate by this value, keeping them consistent.
+        #[cfg(target_os = "android")]
+        let slide = crate::loader::reserve_image_and_slide(&image)?.1;
+        #[cfg(not(target_os = "android"))]
+        let slide = cfg.slide;
+
         let layout = LayoutConfig {
-            slide: cfg.slide,
+            slide,
             stack_top: cfg.stack_top,
             stack_size: cfg.stack_size,
             trampoline_base: cfg.trampoline_base,
