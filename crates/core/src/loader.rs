@@ -4,15 +4,18 @@
 //!
 //! ## Slide policy
 //!
-//! We map every image at its *preferred* address (slide = 0). This keeps all
-//! absolute pointers baked into the binary — rebased pointers, initializer
-//! arrays, Obj-C metadata — valid without having to replay the rebase opcode
-//! stream, which materially simplifies bring-up. A production build randomises
-//! the slide and processes `LC_DYLD_INFO` rebases; the seam for that is
-//! [`LayoutConfig::slide`].
+//! The host test path maps at the preferred address (slide = 0). On device the
+//! image is reserved at an OS-chosen base and slid by `dynamic_base -
+//! preferred_base`. When the slide is non-zero, [`build_process`] replays the
+//! `LC_DYLD_INFO` **rebase** opcode stream and adds the slide to every absolute
+//! pointer in `__DATA`/`__DATA_CONST` (Obj-C metadata, initializer arrays, ...),
+//! then applies **binds**. The slide is supplied via [`LayoutConfig::slide`].
 
 use ios_emu_common::{align_up, EmuError, EmuResult, GuestAddr, Protection, PAGE_SIZE};
-use ios_emu_loader::dyld::{parse_bind_info, StubResolver, SymbolResolver, TrampolineTable};
+use ios_emu_loader::dyld::{
+    parse_bind_info, parse_rebase_info, StubResolver, SymbolResolver, TrampolineTable,
+    REBASE_TYPE_POINTER,
+};
 use ios_emu_loader::macho::image::EntryPoint;
 use ios_emu_loader::MachOImage;
 use ios_emu_memory::{GuestMemory, RegionKind};
@@ -87,6 +90,43 @@ pub fn build_process(
         let load_prot = Protection::rw();
         mem.map_with_data(base, seg.vmsize, data, load_prot, RegionKind::Segment, &seg.name)?;
         seg_runtime.push(Some(base));
+    }
+
+    // ---- 1.5 Rebase: relocate absolute pointers by the slide ---------------
+    // Every pointer the linker baked into __DATA/__DATA_CONST stores its
+    // preferred address; add the slide so a slid PIE does not dereference an
+    // un-slid 0x1_00xx_xxxx address (SEGV). Segments are still writable here
+    // (mapped rw- in step 1); the final protections are applied in step 4. When
+    // slide == 0 (host / map-at-preferred) rebasing is a no-op, so skip it.
+    if slide != 0 {
+        if let Some(info) = &image.dyld_info {
+            if info.rebase_size != 0 {
+                let end = (info.rebase_off + info.rebase_size) as usize;
+                let stream = bytes
+                    .get(info.rebase_off as usize..end)
+                    .ok_or_else(|| EmuError::Dyld("rebase stream out of range".into()))?;
+                for loc in parse_rebase_info(stream)? {
+                    if loc.rtype != REBASE_TYPE_POINTER {
+                        log::warn!("unsupported rebase type {} (seg {})", loc.rtype, loc.seg_index);
+                        continue;
+                    }
+                    let seg_base = match seg_runtime.get(loc.seg_index as usize).and_then(|o| *o) {
+                        Some(b) => b,
+                        None => {
+                            log::warn!("rebase targets unmapped segment {}", loc.seg_index);
+                            continue;
+                        }
+                    };
+                    let target = seg_base + loc.seg_offset;
+                    // POINTER rebase: read the stored preferred address (64-bit on
+                    // arm64) and write it back plus the slide.
+                    match mem.read_u64(target) {
+                        Ok(v) => mem.write_u64(target, v.wrapping_add(slide))?,
+                        Err(_) => log::warn!("rebase read failed @ {target}"),
+                    }
+                }
+            }
+        }
     }
 
     // ---- 2. Resolve imports and bind pointers to trampolines ---------------

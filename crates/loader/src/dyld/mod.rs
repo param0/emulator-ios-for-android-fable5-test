@@ -11,6 +11,8 @@
 
 pub mod bind;
 pub mod linker;
+pub mod rebase;
 
 pub use bind::{parse_bind_info, BindKind, BindRecord};
 pub use linker::{StubResolver, SymbolResolver, TrampolineTable};
+pub use rebase::{parse_rebase_info, RebaseLocation, REBASE_TYPE_POINTER};
