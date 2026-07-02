@@ -21,6 +21,13 @@ fn main() {
         .join("..")
         .join("native");
 
+    // Recompile whenever any native source or the shared header changes. Emit
+    // these *before* `compile()` so an edit to vm_bridge.c always re-triggers the
+    // build script and thus the cc invocation.
+    for f in ["src/jit_exec.c", "src/vm_bridge.c", "include/ios_emu_jit.h"] {
+        println!("cargo:rerun-if-changed={}", native.join(f).display());
+    }
+
     let mut build = cc::Build::new();
     build
         .file(native.join("src/jit_exec.c"))
@@ -31,7 +38,7 @@ fn main() {
         .warnings(true);
     build.compile("ios_emu_native");
 
-    for f in ["src/jit_exec.c", "src/vm_bridge.c", "include/ios_emu_jit.h"] {
-        println!("cargo:rerun-if-changed={}", native.join(f).display());
-    }
+    // `vm_bridge.c` calls __android_log_print; link the NDK log library into the
+    // final cdylib.
+    println!("cargo:rustc-link-lib=log");
 }

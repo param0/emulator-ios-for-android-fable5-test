@@ -1,21 +1,26 @@
 /*
- * vm_bridge.c — maps guest memory at its guest virtual addresses.
+ * vm_bridge.c — reserves guest memory for a PIE Mach-O image.
  *
- * For native execution the guest's address space must physically exist at the
- * guest addresses in this process (an identity mapping), so a guest load/store
- * to `0x1_0000_0000` hits real memory. The Rust `GuestMemory` remains the
- * authority on layout and contents; on device it drives these calls to
- * materialise each region, then copies the bytes in.
+ * The guest is a position-independent executable, so its absolute link-time base
+ * (0x100000000) is only a *preferred* address. On modern Android (esp. 16) that
+ * range is not grantable and MAP_FIXED there fails or, worse, silently lands
+ * elsewhere — after which a jump to a hardcoded entry point segfaults.
  *
- * Android note: mapping executable memory backed by app files requires the
- * mapping to be anonymous + copied (W^X is enforced; `PROT_EXEC` on a
- * file-backed writable mapping is denied). We therefore always map anonymous and
- * copy, flipping to the final protection afterwards.
+ * The fix: do NOT request a fixed address. Reserve one contiguous span for the
+ * whole image at an OS-chosen base and hand it back to Rust, which computes the
+ * ASLR slide (chosen_base - preferred_base) and relocates the entry point, the
+ * thread PC, and every segment placement by that slide. The region is mapped
+ * writable; the loader flips each segment to its final protection afterwards.
  */
 #include "ios_emu_jit.h"
 
 #include <sys/mman.h>
 #include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <android/log.h>
+
+#define IOS_EMU_LOG_TAG "ios-emu"
 
 /* Translate our Protection bits (R=1,W=2,X=4) to mmap PROT_* flags. */
 static int to_mmap_prot(uint32_t prot) {
@@ -27,31 +32,52 @@ static int to_mmap_prot(uint32_t prot) {
 }
 
 /*
- * Map [addr, addr+len) as anonymous memory at the fixed guest address and copy
- * `init_len` bytes from `init` into it (the rest stays zero-filled). Returns the
- * mapped address, or NULL on failure. The region is left writable; call
- * ios_emu_native_protect() after any patching to set the final protection.
+ * Reserve `len` bytes for the guest image at an OS-chosen base address.
+ *
+ * No MAP_FIXED: the kernel picks a free base, defeating the Android-16 block on
+ * the preferred 0x100000000 range. Returns the base pointer; the caller derives
+ * the ASLR slide from it. On failure there is no safe way to continue, so we log
+ * the errno via <android/log.h> and abort() — a hard, greppable failure beats a
+ * later SEGV_MAPERR with no context.
  */
-void *ios_emu_native_map_region(uint64_t addr, size_t len,
-                                const void *init, size_t init_len) {
-    void *hint = (void *)(uintptr_t)addr;
-    void *p = mmap(hint, len, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-    if (p == MAP_FAILED) {
-        return 0;
+void *ios_emu_native_map_region(size_t len) {
+    if (len == 0) {
+        __android_log_print(ANDROID_LOG_FATAL, IOS_EMU_LOG_TAG,
+                            "ios_emu_native_map_region: refusing zero-length reservation");
+        abort();
     }
-    if (init && init_len) {
-        memcpy(p, init, init_len < len ? init_len : len);
+
+    void *base = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) {
+        __android_log_print(ANDROID_LOG_FATAL, IOS_EMU_LOG_TAG,
+                            "mmap(NULL, %zu) failed: errno=%d (%s)",
+                            len, errno, strerror(errno));
+        abort();
     }
-    return p;
+
+    __android_log_print(ANDROID_LOG_INFO, IOS_EMU_LOG_TAG,
+                        "reserved image span: %zu bytes at %p", len, base);
+    return base;
 }
 
-/* Apply the final protection to a previously-mapped region. */
+/*
+ * Copy `src_len` bytes of segment file data to `dst` (a slid runtime address
+ * inside the reservation). Kept separate from the reservation so Rust owns the
+ * slide arithmetic. Bounded by `dst_len` (the segment's vmsize).
+ */
+void ios_emu_native_copy_in(void *dst, size_t dst_len, const void *src, size_t src_len) {
+    if (src && src_len) {
+        memcpy(dst, src, src_len < dst_len ? src_len : dst_len);
+    }
+}
+
+/* Apply the final protection to a sub-range of the reservation. */
 int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot) {
     return mprotect((void *)(uintptr_t)addr, len, to_mmap_prot(prot));
 }
 
-/* Unmap a region at teardown. */
+/* Release the whole reservation at teardown. */
 int ios_emu_native_unmap(uint64_t addr, size_t len) {
     return munmap((void *)(uintptr_t)addr, len);
 }

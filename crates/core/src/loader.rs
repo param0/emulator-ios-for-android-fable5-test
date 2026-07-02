@@ -178,13 +178,8 @@ pub fn build_process(
     mem.map(stack_base, cfg.stack_size, Protection::rw(), RegionKind::Stack, "stack")?;
     let (sp, arg_regs) = build_stack(mem, cfg)?;
 
-    // ---- 7. Entry point ----------------------------------------------------
-    let header_addr = image.text_vmaddr() + slide;
-    let entry = match image.entry {
-        Some(EntryPoint::Main { file_offset, .. }) => GuestAddr(header_addr + file_offset),
-        Some(EntryPoint::Thread { vmaddr }) => GuestAddr(vmaddr + slide),
-        None => return Err(EmuError::MachO("image has no entry point".into())),
-    };
+    // ---- 7. Entry point (slid) ---------------------------------------------
+    let entry = resolve_entry(image, slide)?;
 
     Ok(ProcessImage {
         entry,
@@ -195,6 +190,67 @@ pub fn build_process(
         trampoline_end,
         init_funcs,
     })
+}
+
+/// The image's preferred (link-time) base and the total span, in bytes, that
+/// must be reserved to hold every segment. `__PAGEZERO` is excluded — it is an
+/// unmapped guard, not real backing. The preferred base is `__TEXT`'s vmaddr
+/// (0x100000000 for a PIE main executable).
+pub fn image_span(image: &MachOImage) -> (u64, u64) {
+    let preferred_base = image.text_vmaddr();
+    let mut high = preferred_base;
+    for seg in &image.segments {
+        if seg.name == "__PAGEZERO" {
+            continue;
+        }
+        high = high.max(seg.vmaddr.saturating_add(seg.vmsize));
+    }
+    let len = ios_emu_common::align_up(high.saturating_sub(preferred_base), PAGE_SIZE);
+    (preferred_base, len)
+}
+
+/// Apply the ASLR `slide` to the image's entry point / thread PC.
+///
+/// For a PIE, `slide = dynamic_base - preferred_base`. Every link-time address
+/// (segment vmaddrs, the mach-header address, the entry point, and an
+/// `LC_UNIXTHREAD` PC) is relocated by adding `slide`. `LC_MAIN`'s `file_offset`
+/// is relative to the mach header, which maps at `text_vmaddr + slide`.
+pub fn resolve_entry(image: &MachOImage, slide: u64) -> EmuResult<GuestAddr> {
+    let header_addr = image.text_vmaddr().wrapping_add(slide);
+    match image.entry {
+        Some(EntryPoint::Main { file_offset, .. }) => {
+            Ok(GuestAddr(header_addr.wrapping_add(file_offset)))
+        }
+        Some(EntryPoint::Thread { vmaddr }) => Ok(GuestAddr(vmaddr.wrapping_add(slide))),
+        None => Err(EmuError::MachO("image has no entry point".into())),
+    }
+}
+
+/// Device path: reserve the image span via the C backend (OS-chosen base, no
+/// `MAP_FIXED`) and compute the ASLR slide from the returned base. The result
+/// feeds `LayoutConfig::slide` so segment mapping and [`resolve_entry`] relocate
+/// consistently.
+#[cfg(target_os = "android")]
+#[allow(unsafe_code)] // the sole FFI call into the native reservation backend
+pub fn reserve_image_and_slide(image: &MachOImage) -> EmuResult<(GuestAddr, u64)> {
+    extern "C" {
+        // native/src/vm_bridge.c — aborts on failure, so a non-null return is
+        // guaranteed here.
+        fn ios_emu_native_map_region(len: usize) -> *mut core::ffi::c_void;
+    }
+
+    let (preferred_base, len) = image_span(image);
+    // SAFETY: FFI into our own allocator; `len` is non-zero for any real image
+    // and the callee validates/aborts otherwise.
+    let base = unsafe { ios_emu_native_map_region(len as usize) } as u64;
+    if base == 0 {
+        return Err(EmuError::Memory { addr: 0, reason: "native reservation returned null" });
+    }
+    let slide = base.wrapping_sub(preferred_base);
+    log::info!(
+        "PIE image: dynamic base {base:#x}, preferred {preferred_base:#x}, slide {slide:#x}"
+    );
+    Ok((GuestAddr(base), slide))
 }
 
 /// Write `argv`/`envp`/`apple` onto the stack and return `(sp, [argc, argv,
@@ -226,4 +282,68 @@ fn build_stack(mem: &mut GuestMemory, cfg: &LayoutConfig) -> EmuResult<(GuestAdd
     let sp = GuestAddr(argv.raw() & !0xf);
     let arg_regs = [1, argv.raw(), envp.raw(), apple.raw()];
     Ok((sp, arg_regs))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ios_emu_common::Protection;
+    use ios_emu_loader::macho::image::{MachOImage, Segment};
+
+    fn seg(name: &str, vmaddr: u64, vmsize: u64) -> Segment {
+        Segment {
+            name: name.into(),
+            vmaddr,
+            vmsize,
+            fileoff: 0,
+            filesize: vmsize,
+            initprot: Protection::rw(),
+            maxprot: Protection::rw(),
+            sections: vec![],
+        }
+    }
+
+    fn image(entry: EntryPoint) -> MachOImage {
+        MachOImage {
+            cpu_subtype: 0,
+            filetype: 2,
+            flags: 0x0020_0000, // MH_PIE
+            segments: vec![
+                seg("__PAGEZERO", 0, 0x1_0000_0000),
+                seg("__TEXT", 0x1_0000_0000, 0x8000),
+                seg("__DATA", 0x1_0000_8000, 0x4000),
+            ],
+            dylibs: vec![],
+            dylinker: None,
+            entry: Some(entry),
+            symtab: None,
+            dyld_info: None,
+            encryption: None,
+            uuid: None,
+            function_starts: None,
+            min_os_version: None,
+        }
+    }
+
+    #[test]
+    fn span_excludes_pagezero() {
+        let (base, len) = image_span(&image(EntryPoint::Main { file_offset: 0, stack_size: 0 }));
+        assert_eq!(base, 0x1_0000_0000);
+        assert_eq!(len, 0xC000); // __TEXT (0x8000) + __DATA (0x4000)
+    }
+
+    #[test]
+    fn slide_relocates_lc_main_entry() {
+        let img = image(EntryPoint::Main { file_offset: 0x100, stack_size: 0 });
+        // OS picked base 0x2_0000_0000; preferred is 0x1_0000_0000.
+        let slide = 0x2_0000_0000u64.wrapping_sub(0x1_0000_0000);
+        assert_eq!(resolve_entry(&img, slide).unwrap().raw(), 0x2_0000_0100);
+    }
+
+    #[test]
+    fn slide_relocates_thread_pc() {
+        let img = image(EntryPoint::Thread { vmaddr: 0x1_0019_2918 });
+        let slide = 0x3_0000_0000u64.wrapping_sub(0x1_0000_0000);
+        assert_eq!(resolve_entry(&img, slide).unwrap().raw(), 0x3_0019_2918);
+    }
 }
