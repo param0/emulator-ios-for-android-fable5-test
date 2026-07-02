@@ -194,6 +194,20 @@ pub fn build_process(
     mem.protect(cfg.trampoline_base, Protection::rx())?;
     let trampoline_end = cfg.trampoline_base + tramp_bytes;
 
+    // Emit the stub map so a runtime BRK in __stubs (a raw SIGTRAP at some
+    // __stubs+offset in logcat) can be cross-referenced to the exact imported
+    // symbol. Sorted by address; offset is relative to the __stubs base.
+    {
+        let base = cfg.trampoline_base.raw();
+        let mut stubs: Vec<(u64, &str)> =
+            resolver.table().iter().map(|(a, s)| (*a, s.as_str())).collect();
+        stubs.sort_by_key(|(addr, _)| *addr);
+        log::info!("__stubs at {} ({} imports)", cfg.trampoline_base, stubs.len());
+        for (addr, symbol) in stubs {
+            log::info!("Mapped stub for {symbol} at {addr:#018x} (__stubs+{:#x})", addr - base);
+        }
+    }
+
     // ---- 4. Restore real segment protections -------------------------------
     for (seg, base) in image.segments.iter().zip(&seg_runtime) {
         if let Some(base) = base {
@@ -298,6 +312,19 @@ pub fn reserve_native_region(len: u64) -> EmuResult<GuestAddr> {
         return Err(EmuError::Memory { addr: 0, reason: "native reservation returned null" });
     }
     Ok(GuestAddr(base))
+}
+
+/// Device path: publish the `[lo, hi)` stub-page range to the native trap
+/// handler so a `BRK` executed there is classified as an imported-function call
+/// (dispatched gracefully) rather than a fatal breakpoint / raw SIGTRAP.
+#[cfg(target_os = "android")]
+#[allow(unsafe_code)]
+pub fn set_native_trampoline_range(lo: GuestAddr, hi: GuestAddr) {
+    extern "C" {
+        fn ios_emu_native_set_trampoline_range(lo: u64, hi: u64);
+    }
+    // SAFETY: pure FFI publishing two integers to the native backend.
+    unsafe { ios_emu_native_set_trampoline_range(lo.raw(), hi.raw()) };
 }
 
 /// Device path: reserve the image span and compute the ASLR slide from the

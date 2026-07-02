@@ -138,6 +138,12 @@ impl Machine {
         };
         let proc = build_process(&image, bytes, &mut mem, &layout)?;
 
+        // Tell the native trap handler where the stub page lives so a BRK there
+        // is dispatched as an imported call (see service_trampoline) instead of
+        // surfacing as a fatal SIGTRAP.
+        #[cfg(target_os = "android")]
+        crate::loader::set_native_trampoline_range(proc.trampoline_base, proc.trampoline_end);
+
         let cpu = CpuContext::entry(proc.entry.raw(), proc.sp.raw(), proc.arg_regs);
 
         Ok(Machine {
@@ -226,18 +232,23 @@ impl Machine {
         let symbol = match self.trampolines.get(&addr.raw()) {
             Some(s) => s.clone(),
             None => {
-                log::warn!("call into unmapped trampoline {addr}");
+                log::warn!("call into unmapped trampoline {addr} (lr {:#018x})", self.cpu.lr);
                 self.cpu.pc = self.cpu.lr;
                 return;
             }
         };
+        // Name the imported call as it happens, so the symbol behind a __stubs
+        // BRK is identifiable at runtime in logcat (not just at load time).
+        log::info!(target: "ios_emu::import", "call {symbol} (stub {addr}, from lr {:#018x})", self.cpu.lr);
 
         // Disjoint field borrows: the environment gets cpu/mem/vfs while we hold
         // `&mut self.world` — the borrow checker sees these as separate fields.
         let mut ctx = CallContext { cpu: &mut self.cpu, mem: &mut self.mem, vfs: &self.vfs };
         let disp = self.world.call(&symbol, &mut ctx);
         if disp == Dispatch::Unhandled {
-            log::trace!(target: "ios_emu::stub", "STUB import::{symbol}");
+            // Graceful: log the unimplemented import and return 0 rather than
+            // leaving the guest to re-execute the BRK as a fatal SIGTRAP.
+            log::warn!(target: "ios_emu::import", "unimplemented import {symbol}; returning 0");
             self.cpu.set_ret(0);
         }
         // Return to caller.
