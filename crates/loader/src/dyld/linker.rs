@@ -62,6 +62,13 @@ impl StubResolver {
     pub fn table(&self) -> &TrampolineTable {
         &self.reverse
     }
+
+    /// The forward symbol -> trampoline-address map, for callers that must
+    /// resolve a symbol *name* to its stub (e.g. `dyld_stub_binder` patching a
+    /// lazy pointer).
+    pub fn forward(&self) -> HashMap<String, u64> {
+        self.forward.iter().map(|(k, v)| (k.clone(), v.raw())).collect()
+    }
 }
 
 impl SymbolResolver for StubResolver {

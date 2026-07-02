@@ -134,6 +134,66 @@ pub fn parse_bind_info(stream: &[u8]) -> EmuResult<Vec<BindRecord>> {
     Ok(records)
 }
 
+/// One entry of the lazy binding info, keyed by the byte `offset` at which its
+/// opcode sequence begins — exactly the value `__stub_helper` loads into `w16`
+/// and passes to `dyld_stub_binder`. The pointer to update lives at segment
+/// `seg_index` + `seg_offset`.
+#[derive(Clone, Debug)]
+pub struct LazyBind {
+    pub offset: u64,
+    pub seg_index: u8,
+    pub seg_offset: u64,
+    pub symbol: String,
+}
+
+/// Parse the *lazy* bind stream, recording the start offset of every symbol's
+/// sequence so `dyld_stub_binder` can look a symbol up by the offset the stub
+/// hands it. Lazy sequences are simple: set segment/offset, set ordinal, set
+/// symbol, `DO_BIND`, `DONE`.
+pub fn parse_lazy_bind_info(stream: &[u8]) -> EmuResult<Vec<LazyBind>> {
+    let mut out = Vec::new();
+    let mut p = 0usize;
+    let mut seq_start = 0u64; // offset of the current symbol's first opcode
+    let mut seg_index = 0u8;
+    let mut seg_offset = 0u64;
+    let mut symbol = String::new();
+
+    while p < stream.len() {
+        let byte = stream[p];
+        p += 1;
+        let opcode = byte & BIND_OPCODE_MASK;
+        let imm = byte & BIND_IMMEDIATE_MASK;
+        match opcode {
+            // End of this symbol; the next sequence starts at the following byte.
+            BIND_OPCODE_DONE => seq_start = p as u64,
+            BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | BIND_OPCODE_SET_DYLIB_SPECIAL_IMM => {}
+            BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB => {
+                read_uleb(stream, &mut p)?;
+            }
+            BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM => {
+                symbol = read_cstr(stream, &mut p)?;
+            }
+            BIND_OPCODE_SET_TYPE_IMM => {}
+            BIND_OPCODE_SET_ADDEND_SLEB => {
+                read_sleb(stream, &mut p)?;
+            }
+            BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB => {
+                seg_index = imm;
+                seg_offset = read_uleb(stream, &mut p)?;
+            }
+            BIND_OPCODE_ADD_ADDR_ULEB => {
+                seg_offset = seg_offset.wrapping_add(read_uleb(stream, &mut p)?);
+            }
+            BIND_OPCODE_DO_BIND => {
+                out.push(LazyBind { offset: seq_start, seg_index, seg_offset, symbol: symbol.clone() });
+            }
+            // Other DO_BIND_* forms do not appear in lazy streams; ignore.
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit(
     out: &mut Vec<BindRecord>,
@@ -215,6 +275,34 @@ mod tests {
         assert_eq!(read_uleb(&[0xe5, 0x8e, 0x26], &mut p).unwrap(), 624485);
         let mut p = 0;
         assert_eq!(read_sleb(&[0x9b, 0xf1, 0x59], &mut p).unwrap(), -624485);
+    }
+
+    #[test]
+    fn lazy_bind_records_sequence_offsets() {
+        // Two lazy symbols, each: SET_SEGMENT_AND_OFFSET; SET_SYMBOL; DO_BIND; DONE.
+        let mut s = Vec::new();
+        s.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 2);
+        s.push(0x00);
+        s.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
+        s.extend_from_slice(b"_objc_msgSend\0");
+        s.push(BIND_OPCODE_DO_BIND);
+        s.push(BIND_OPCODE_DONE);
+        let off_b = s.len() as u64;
+        s.push(BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | 2);
+        s.push(0x08);
+        s.push(BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM);
+        s.extend_from_slice(b"_malloc\0");
+        s.push(BIND_OPCODE_DO_BIND);
+        s.push(BIND_OPCODE_DONE);
+
+        let lz = parse_lazy_bind_info(&s).unwrap();
+        assert_eq!(lz.len(), 2);
+        assert_eq!(lz[0].offset, 0);
+        assert_eq!(lz[0].symbol, "_objc_msgSend");
+        assert_eq!(lz[0].seg_offset, 0);
+        assert_eq!(lz[1].offset, off_b);
+        assert_eq!(lz[1].symbol, "_malloc");
+        assert_eq!(lz[1].seg_offset, 8);
     }
 
     #[test]

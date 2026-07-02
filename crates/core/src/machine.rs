@@ -1,5 +1,7 @@
 //! The `Machine`: owns the guest process and drives the execute/dispatch loop.
 
+use std::collections::HashMap;
+
 use ios_emu_common::{EmuResult, GuestAddr, PAGE_SIZE};
 use ios_emu_loader::dyld::TrampolineTable;
 use ios_emu_loader::MachOImage;
@@ -60,6 +62,10 @@ pub struct Machine {
     world: Box<dyn HostEnvironment>,
     trampolines: TrampolineTable,
     tramp_range: (u64, u64),
+    /// imported symbol name -> stub address (for `dyld_stub_binder`).
+    symbol_stubs: HashMap<String, u64>,
+    /// lazy-bind offset -> (symbol, la_symbol_ptr slot) (for `dyld_stub_binder`).
+    lazy_binds: HashMap<u64, (String, GuestAddr)>,
     exit: Option<i32>,
     /// Module initializers to run before `main` (in registration order).
     pub init_funcs: Vec<GuestAddr>,
@@ -155,6 +161,8 @@ impl Machine {
             world,
             trampolines: proc.trampolines,
             tramp_range: (proc.trampoline_base.raw(), proc.trampoline_end.raw()),
+            symbol_stubs: proc.symbol_stubs,
+            lazy_binds: proc.lazy_binds,
             exit: None,
             init_funcs: proc.init_funcs,
             entry: proc.entry,
@@ -237,6 +245,14 @@ impl Machine {
                 return;
             }
         };
+        // Lazy binding: the game called dyld_stub_binder via __stub_helper. This
+        // is an architecture-level trampoline, not a normal library call — handle
+        // it specially (resolve, patch the pointer, tail-jump) and return.
+        if symbol == "dyld_stub_binder" {
+            self.dyld_stub_binder();
+            return;
+        }
+
         // Name the imported call as it happens, so the symbol behind a __stubs
         // BRK is identifiable at runtime in logcat (not just at load time).
         log::info!(target: "ios_emu::import", "call {symbol} (stub {addr}, from lr {:#018x})", self.cpu.lr);
@@ -253,6 +269,64 @@ impl Machine {
         }
         // Return to caller.
         self.cpu.pc = self.cpu.lr;
+    }
+
+    /// HLE of `dyld_stub_binder` — the lazy-binding trampoline.
+    ///
+    /// `__stub_helper` pushes two words before branching here: `[sp]` is the
+    /// lazy-binding-info offset (loaded via `ldr w16, #imm`, zero-extended) and
+    /// `[sp+8]` is the image cookie (unused). We look the offset up in the lazy
+    /// table for the symbol and the `la_symbol_ptr` slot, resolve the symbol to
+    /// its stub, patch the slot so subsequent calls bypass the binder, pop the
+    /// two-word frame, and tail-jump to the stub. `x0..x8` / `q0..q7` (the callee
+    /// arguments) are never touched, so they survive the binder call intact.
+    fn dyld_stub_binder(&mut self) {
+        let sp = self.cpu.sp;
+        // Low 32 bits: the stub stores the offset with `ldr w16` (32-bit).
+        let lazy_offset = match self.mem.read_u64(GuestAddr(sp)) {
+            Ok(v) => v & 0xffff_ffff,
+            Err(_) => {
+                log::error!("dyld_stub_binder: unreadable sp {sp:#018x}");
+                self.cpu.pc = self.cpu.lr;
+                return;
+            }
+        };
+
+        let (symbol, la_ptr) = match self.lazy_binds.get(&lazy_offset) {
+            Some((s, p)) => (s.clone(), *p),
+            None => {
+                log::error!("dyld_stub_binder: no lazy bind at offset {lazy_offset:#x}");
+                self.cpu.pc = self.cpu.lr;
+                return;
+            }
+        };
+
+        let resolved = match self.symbol_stubs.get(&symbol) {
+            Some(&addr) => addr,
+            None => {
+                log::error!("dyld_stub_binder: unresolved lazy symbol {symbol}");
+                self.cpu.pc = self.cpu.lr;
+                return;
+            }
+        };
+
+        log::info!(
+            target: "ios_emu::import",
+            "lazy-bind {symbol}: la_ptr {la_ptr} -> stub {resolved:#018x}"
+        );
+
+        // Patch the lazy pointer so future calls jump straight to the stub, and
+        // publish it to the native page (la_symbol_ptr lives in rw __DATA).
+        if self.mem.write_u64(la_ptr, resolved).is_ok() {
+            let _ = self.mem.commit_to_native(la_ptr);
+        } else {
+            log::warn!("dyld_stub_binder: could not patch la_ptr {la_ptr}");
+        }
+
+        // Pop the frame __stub_helper pushed, then tail-jump to the resolved stub
+        // (which re-enters as the real symbol). Arguments in x0..x8 are untouched.
+        self.cpu.sp = sp.wrapping_add(16);
+        self.cpu.pc = resolved;
     }
 
     /// Reset the register file to the process entry state (used to re-run, or to
@@ -290,6 +364,8 @@ mod tests {
             world: Box::new(NullEnvironment),
             trampolines: TrampolineTable::new(),
             tramp_range: (0, 0),
+            symbol_stubs: HashMap::new(),
+            lazy_binds: HashMap::new(),
             exit: None,
             init_funcs: Vec::new(),
             entry: GuestAddr(0),
@@ -307,6 +383,34 @@ mod tests {
         let mut exec = ScriptedExecutor::new([ExecEvent::Syscall { imm: 0x80 }]);
         let exit = m.run(&mut exec).unwrap();
         assert_eq!(exit.code, 42);
+    }
+
+    #[test]
+    fn dyld_stub_binder_resolves_patches_and_jumps() {
+        let mut m = bare_machine();
+        let sp = GuestAddr(0x1_0000_0000);
+        let la_ptr = GuestAddr(0x1_0000_0100);
+        let lazy_offset = 0x40u64;
+
+        // __stub_helper pushed [lazy_offset, dyld_private].
+        m.mem.write_u64(sp, lazy_offset).unwrap();
+        m.mem.write_u64(GuestAddr(sp.raw() + 8), 0xdead_beef).unwrap();
+        m.lazy_binds.insert(lazy_offset, ("objc_msgSend".to_string(), la_ptr));
+        m.symbol_stubs.insert("objc_msgSend".to_string(), 0x5_0000_0000);
+
+        // Arguments that must survive the binder untouched.
+        m.cpu.x[0] = 0x1111;
+        m.cpu.x[1] = 0x2222;
+        m.cpu.sp = sp.raw();
+        m.cpu.lr = 0x1234;
+
+        m.dyld_stub_binder();
+
+        assert_eq!(m.cpu.pc, 0x5_0000_0000); // tail-jump to the resolved stub
+        assert_eq!(m.cpu.sp, sp.raw() + 16); // helper frame popped
+        assert_eq!(m.mem.read_u64(la_ptr).unwrap(), 0x5_0000_0000); // lazy ptr patched
+        assert_eq!(m.cpu.x[0], 0x1111); // args preserved
+        assert_eq!(m.cpu.x[1], 0x2222);
     }
 
     #[test]

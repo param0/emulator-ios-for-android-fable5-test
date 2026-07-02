@@ -13,9 +13,10 @@
 
 use ios_emu_common::{align_up, EmuError, EmuResult, GuestAddr, Protection, PAGE_SIZE};
 use ios_emu_loader::dyld::{
-    parse_bind_info, parse_rebase_info, StubResolver, SymbolResolver, TrampolineTable,
-    REBASE_TYPE_POINTER,
+    parse_bind_info, parse_lazy_bind_info, parse_rebase_info, StubResolver, SymbolResolver,
+    TrampolineTable, REBASE_TYPE_POINTER,
 };
+use std::collections::HashMap;
 use ios_emu_loader::macho::image::EntryPoint;
 use ios_emu_loader::MachOImage;
 use ios_emu_memory::{GuestMemory, RegionKind};
@@ -45,6 +46,12 @@ pub struct ProcessImage {
     pub trampoline_end: GuestAddr,
     /// Module initializers (`__mod_init_func`) to run before `main`.
     pub init_funcs: Vec<GuestAddr>,
+    /// Forward map (imported symbol name -> its stub/trampoline address), used by
+    /// `dyld_stub_binder` to resolve a lazily-bound symbol.
+    pub symbol_stubs: HashMap<String, u64>,
+    /// Lazy-binding table: the offset `__stub_helper` passes to
+    /// `dyld_stub_binder` -> (symbol, the lazy pointer to patch).
+    pub lazy_binds: HashMap<u64, (String, GuestAddr)>,
 }
 
 /// `BRK #0` — the AArch64 trap the native backend intercepts inside the
@@ -248,6 +255,29 @@ pub fn build_process(
     // ---- 7. Entry point (slid) ---------------------------------------------
     let entry = resolve_entry(image, slide)?;
 
+    // ---- 8. Lazy-binding table for dyld_stub_binder ------------------------
+    // Map each lazy sequence's start offset (what __stub_helper hands the binder)
+    // to (symbol, the la_symbol_ptr slot to patch). Every one of these symbols
+    // already has a stub from step 2, so `symbol_stubs` can resolve it.
+    let mut lazy_binds: HashMap<u64, (String, GuestAddr)> = HashMap::new();
+    if let Some(info) = &image.dyld_info {
+        if info.lazy_bind_size != 0 {
+            let end = (info.lazy_bind_off + info.lazy_bind_size) as usize;
+            let stream = bytes
+                .get(info.lazy_bind_off as usize..end)
+                .ok_or_else(|| EmuError::Dyld("lazy bind stream out of range".into()))?;
+            for lb in parse_lazy_bind_info(stream)? {
+                match seg_runtime.get(lb.seg_index as usize).and_then(|o| *o) {
+                    Some(seg_base) => {
+                        lazy_binds.insert(lb.offset, (lb.symbol, seg_base + lb.seg_offset));
+                    }
+                    None => log::warn!("lazy bind targets unmapped segment {}", lb.seg_index),
+                }
+            }
+        }
+    }
+    let symbol_stubs = resolver.forward();
+
     Ok(ProcessImage {
         entry,
         sp,
@@ -256,6 +286,8 @@ pub fn build_process(
         trampoline_base: cfg.trampoline_base,
         trampoline_end,
         init_funcs,
+        symbol_stubs,
+        lazy_binds,
     })
 }
 
