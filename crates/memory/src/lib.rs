@@ -32,7 +32,10 @@ use std::collections::BTreeMap;
 #[cfg(target_os = "android")]
 extern "C" {
     fn ios_emu_native_protect(addr: u64, len: usize, prot: u32) -> i32;
-    fn ios_emu_native_flush_icache(addr: u64, len: usize);
+    // Exported C wrapper around the AArch64 cache-maintenance sequence. We link
+    // this rather than `__clear_cache` (a compiler-rt builtin symbol that Android
+    // libc.so does not export, which broke dlopen with UnsatisfiedLinkError).
+    fn ios_emu_native_clear_cache(begin: *const core::ffi::c_void, end: *const core::ffi::c_void);
 }
 
 /// The full emulated address space for one iOS process.
@@ -153,8 +156,10 @@ impl GuestMemory {
             // bytes and faults SIGILL. This is the single choke point through
             // which every executable region passes.
             if prot.contains(Protection::EXEC) {
+                let begin = base as *const core::ffi::c_void;
+                let end = (base + len as u64) as *const core::ffi::c_void;
                 // SAFETY: FFI cache-flush over the same owned, mapped range.
-                unsafe { ios_emu_native_flush_icache(base, len) };
+                unsafe { ios_emu_native_clear_cache(begin, end) };
             }
         }
         Ok(())

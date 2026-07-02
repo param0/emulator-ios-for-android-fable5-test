@@ -78,12 +78,14 @@ void *ios_emu_native_map_region(size_t len);
 int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot);
 
 /*
- * Publish freshly-written code in [addr, addr+len) to the instruction cache
- * (clean D-cache to PoU + invalidate I-cache). MUST be called after copying/
- * patching an executable region and before the first jump into it, or the CPU
- * fetches stale bytes and faults with SIGILL/ILL_ILLOPC.
+ * Publish freshly-written code in [begin, end) to the instruction cache (clean
+ * D-cache to PoU + invalidate I-cache). MUST be called after copying/patching an
+ * executable region and before the first jump into it, or the CPU fetches stale
+ * bytes and faults with SIGILL/ILL_ILLOPC. Implemented with inline AArch64 cache
+ * ops so it references no external symbol (avoids the unexported `__clear_cache`
+ * that `__builtin___clear_cache` can emit).
  */
-void ios_emu_native_flush_icache(uint64_t addr, size_t len);
+void ios_emu_native_clear_cache(char *begin, char *end);
 
 /*
  * Install `ctx` into the real CPU and resume guest execution at `ctx->pc` until

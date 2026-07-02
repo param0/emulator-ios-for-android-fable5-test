@@ -78,17 +78,45 @@ int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot) {
 }
 
 /*
- * Flush the instruction cache for [addr, addr+len) after writing code there and
- * marking it executable. ARM64 I-cache and D-cache are NOT coherent: freshly
- * stored instructions sit in the D-cache while the I-cache fetches stale bytes,
- * which faults as SIGILL/ILL_ILLOPC. __builtin___clear_cache emits the required
- * publish sequence (dc cvau over the range, dsb ish, ic ivau, dsb ish, isb).
- * Call after copying/patching loaded __TEXT and after filling the __stubs page,
- * strictly before the first jump into that code.
+ * Publish freshly-written code in [begin, end) to the instruction cache after
+ * writing it and marking the page executable. ARM64 I-cache and D-cache are NOT
+ * coherent: stored instructions sit in the D-cache while the I-cache fetches
+ * stale bytes, faulting as SIGILL/ILL_ILLOPC on the first jump. Call after
+ * copying/patching loaded __TEXT and after filling the __stubs page, strictly
+ * before executing.
+ *
+ * We deliberately do NOT use __builtin___clear_cache: on the NDK it can lower to
+ * a call to the compiler-rt symbol `__clear_cache`, which libc.so does not
+ * export, leaving libios_emu_jni.so with an unresolved dynamic symbol (dlopen ->
+ * UnsatisfiedLinkError). Emitting the maintenance sequence inline references no
+ * external symbol. This mirrors compiler-rt's own __clear_cache for AArch64.
  */
-void ios_emu_native_flush_icache(uint64_t addr, size_t len) {
-    char *begin = (char *)(uintptr_t)addr;
-    __builtin___clear_cache(begin, begin + len);
+void ios_emu_native_clear_cache(char *begin, char *end) {
+#if defined(__aarch64__)
+    /* CTR_EL0 encodes the minimum D/I cache line sizes (log2 words). */
+    uint64_t ctr;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    const size_t dcache_line = (size_t)4 << ((ctr >> 16) & 0xF);
+    const size_t icache_line = (size_t)4 << (ctr & 0xF);
+
+    /* Clean each D-cache line to the point of unification. */
+    for (uintptr_t a = (uintptr_t)begin & ~(dcache_line - 1);
+         a < (uintptr_t)end; a += dcache_line) {
+        __asm__ __volatile__("dc cvau, %0" : : "r"(a) : "memory");
+    }
+    __asm__ __volatile__("dsb ish" : : : "memory");
+
+    /* Invalidate each I-cache line to the point of unification. */
+    for (uintptr_t a = (uintptr_t)begin & ~(icache_line - 1);
+         a < (uintptr_t)end; a += icache_line) {
+        __asm__ __volatile__("ic ivau, %0" : : "r"(a) : "memory");
+    }
+    __asm__ __volatile__("dsb ish" : : : "memory");
+    __asm__ __volatile__("isb" : : : "memory");
+#else
+    /* Host / non-AArch64: caches are coherent or the builtin inlines safely. */
+    __builtin___clear_cache(begin, end);
+#endif
 }
 
 /* Release the whole reservation at teardown. */
