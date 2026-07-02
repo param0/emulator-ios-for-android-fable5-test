@@ -32,6 +32,13 @@ use std::collections::BTreeMap;
 #[cfg(target_os = "android")]
 extern "C" {
     fn ios_emu_native_protect(addr: u64, len: usize, prot: u32) -> i32;
+    // Publish a region's bytes into its native reservation before mprotect.
+    fn ios_emu_native_copy_in(
+        dst: *mut core::ffi::c_void,
+        dst_len: usize,
+        src: *const core::ffi::c_void,
+        src_len: usize,
+    );
     // Exported C wrapper around the AArch64 cache-maintenance sequence. We link
     // this rather than `__clear_cache` (a compiler-rt builtin symbol that Android
     // libc.so does not export, which broke dlopen with UnsatisfiedLinkError).
@@ -145,6 +152,25 @@ impl GuestMemory {
         #[cfg(target_os = "android")]
         {
             let len = region.size() as usize;
+
+            // Commit the region's initialized contents (Mach-O file data plus any
+            // dyld binds and BRK fills, held in the host-side buffer) into the
+            // native reservation while it is STILL WRITABLE — before the mprotect
+            // below flips it to r-x. Skipping this leaves the native pages
+            // zero-filled, so executing __TEXT faults SIGILL on 0x00000000. This
+            // is the copy phase that must precede mprotect and clear_cache.
+            let bytes = region.bytes();
+            // SAFETY: FFI copy from the region's owned host buffer into its own
+            // native reservation; the C side bounds the copy by `len`.
+            unsafe {
+                ios_emu_native_copy_in(
+                    base as *mut core::ffi::c_void,
+                    len,
+                    bytes.as_ptr() as *const core::ffi::c_void,
+                    bytes.len(),
+                );
+            }
+
             // SAFETY: FFI into our own mprotect wrapper; `base`/`len` describe a
             // page-aligned region this manager owns and previously mapped.
             let rc = unsafe { ios_emu_native_protect(base, len, prot.0 as u32) };

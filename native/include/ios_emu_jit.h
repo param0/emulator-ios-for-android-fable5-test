@@ -74,6 +74,13 @@ void ios_emu_native_prepare_text(void *addr, size_t len);
  */
 void *ios_emu_native_map_region(size_t len);
 
+/*
+ * Copy `src_len` bytes into a reservation at `dst` (bounded by `dst_len`). Used
+ * to publish a segment's initialized contents (Mach-O file data + dyld binds)
+ * into the native pages while they are still writable, before `mprotect`.
+ */
+void ios_emu_native_copy_in(void *dst, size_t dst_len, const void *src, size_t src_len);
+
 /* Apply the final protection (R/W/X bits) to a sub-range of a reservation. */
 int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot);
 
