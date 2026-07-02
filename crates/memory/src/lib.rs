@@ -35,7 +35,8 @@ extern "C" {
     // Exported C wrapper around the AArch64 cache-maintenance sequence. We link
     // this rather than `__clear_cache` (a compiler-rt builtin symbol that Android
     // libc.so does not export, which broke dlopen with UnsatisfiedLinkError).
-    fn ios_emu_native_clear_cache(begin: *const core::ffi::c_void, end: *const core::ffi::c_void);
+    // Takes (start, len) and derives end = start + len internally.
+    fn ios_emu_native_clear_cache(start: *mut core::ffi::c_void, len: usize);
 }
 
 /// The full emulated address space for one iOS process.
@@ -150,16 +151,16 @@ impl GuestMemory {
             if rc != 0 {
                 return Err(EmuError::Memory { addr: base, reason: "native mprotect failed" });
             }
-            // A region that just became executable may hold freshly-written code
-            // (loaded __TEXT, the BRK-filled __stubs page). Publish it to the
-            // I-cache now — before any jump into it — or the CPU fetches stale
-            // bytes and faults SIGILL. This is the single choke point through
-            // which every executable region passes.
+            // Immediately after the mprotect that made this region executable
+            // (r-x for __TEXT / __stubs), publish the freshly-written code to the
+            // I-cache — before any jump into it — or the CPU fetches stale bytes
+            // and faults SIGILL. `protect` is the single choke point every
+            // executable region passes through. Pass (start, len); the C wrapper
+            // derives end = start + len internally.
             if prot.contains(Protection::EXEC) {
-                let begin = base as *const core::ffi::c_void;
-                let end = (base + len as u64) as *const core::ffi::c_void;
+                let start = base as *mut core::ffi::c_void;
                 // SAFETY: FFI cache-flush over the same owned, mapped range.
-                unsafe { ios_emu_native_clear_cache(begin, end) };
+                unsafe { ios_emu_native_clear_cache(start, len) };
             }
         }
         Ok(())

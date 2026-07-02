@@ -85,7 +85,7 @@ int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot);
  * ops so it references no external symbol (avoids the unexported `__clear_cache`
  * that `__builtin___clear_cache` can emit).
  */
-void ios_emu_native_clear_cache(char *begin, char *end);
+void ios_emu_native_clear_cache(void *start, size_t len);
 
 /*
  * Install `ctx` into the real CPU and resume guest execution at `ctx->pc` until

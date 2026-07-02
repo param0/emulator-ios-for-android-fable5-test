@@ -91,7 +91,11 @@ int ios_emu_native_protect(uint64_t addr, size_t len, uint32_t prot) {
  * UnsatisfiedLinkError). Emitting the maintenance sequence inline references no
  * external symbol. This mirrors compiler-rt's own __clear_cache for AArch64.
  */
-void ios_emu_native_clear_cache(char *begin, char *end) {
+void ios_emu_native_clear_cache(void *start, size_t len) {
+    /* Compute the end pointer internally so a caller can never pass a length
+     * where an end pointer is expected: the range is [start, start + len). */
+    char *begin = (char *)start;
+    char *end = begin + len;
 #if defined(__aarch64__)
     /* CTR_EL0 encodes the minimum D/I cache line sizes (log2 words). */
     uint64_t ctr;
