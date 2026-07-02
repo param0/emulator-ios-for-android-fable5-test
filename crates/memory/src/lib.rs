@@ -192,6 +192,35 @@ impl GuestMemory {
         Ok(())
     }
 
+    /// Publish a region's initialized bytes into its native reservation.
+    ///
+    /// Device-only; a no-op on the host. Regions that never pass through
+    /// [`protect`](Self::protect) — notably the stack — are committed here so
+    /// their contents (e.g. the argv/envp/apple vectors the loader writes) are
+    /// visible to native guest execution, which reads the real pages rather than
+    /// this manager's host-side buffer.
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))]
+    #[cfg_attr(target_os = "android", allow(unsafe_code))]
+    pub fn commit_to_native(&self, addr: GuestAddr) -> EmuResult<()> {
+        #[cfg(target_os = "android")]
+        {
+            let base = self.region_base(addr)?;
+            let region = self.regions.get(&base).unwrap();
+            let bytes = region.bytes();
+            // SAFETY: copy the region's owned buffer into its own native
+            // reservation; both spans have length `bytes.len()`.
+            unsafe {
+                ios_emu_native_copy_in(
+                    base as *mut core::ffi::c_void,
+                    bytes.len(),
+                    bytes.as_ptr() as *const core::ffi::c_void,
+                    bytes.len(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Allocate `size` bytes from the managed heap (backs `malloc`).
     pub fn heap_alloc(&mut self, size: u64, align: u64) -> EmuResult<GuestAddr> {
         self.heap.alloc(size, align)

@@ -115,9 +115,22 @@ impl Machine {
         #[cfg(not(target_os = "android"))]
         let trampoline_base = cfg.trampoline_base;
 
+        // Main-thread stack. The hardcoded 0x1bf800000 is not grantable on
+        // Android 16, so the guest's first SP write faults SEGV_MAPERR. Reserve
+        // real memory at an OS-chosen base (no MAP_FIXED) and set stack_top =
+        // base + size so SP starts at the high end and grows down into mapped
+        // pages. On the host the configured top is fine (Vec-backed bookkeeping).
+        #[cfg(target_os = "android")]
+        let stack_top = {
+            let base = crate::loader::reserve_native_region(cfg.stack_size)?;
+            GuestAddr(base.raw() + cfg.stack_size)
+        };
+        #[cfg(not(target_os = "android"))]
+        let stack_top = cfg.stack_top;
+
         let layout = LayoutConfig {
             slide,
-            stack_top: cfg.stack_top,
+            stack_top,
             stack_size: cfg.stack_size,
             trampoline_base,
             trampoline_stride: 16,

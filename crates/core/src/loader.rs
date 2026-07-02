@@ -186,6 +186,10 @@ pub fn build_process(
     let stack_base = GuestAddr(cfg.stack_top.raw() - cfg.stack_size);
     mem.map(stack_base, cfg.stack_size, Protection::rw(), RegionKind::Stack, "stack")?;
     let (sp, arg_regs) = build_stack(mem, cfg)?;
+    // The stack stays rw- (never mprotect'd), so it does not pass through the
+    // copy-on-protect path. Publish its initialized argv/envp/apple bytes to the
+    // native reservation explicitly, or the guest reads a zero-filled stack.
+    mem.commit_to_native(stack_base)?;
 
     // ---- 7. Entry point (slid) ---------------------------------------------
     let entry = resolve_entry(image, slide)?;
