@@ -98,3 +98,26 @@ fn run_loop_services_exit() {
     let exit = machine.run(&mut exec).expect("run");
     assert_eq!(exit.code, 7);
 }
+
+/// W^X invariant: after loading, no mapped region may be simultaneously writable
+/// and executable. The `__TEXT` segment and the stub page must end up `r-x`
+/// (mapped `rw-` only during the load/fill phase). A regression here is what
+/// caused SEGV_ACCERR on Android 16.
+#[test]
+fn no_region_is_writable_and_executable() {
+    use ios_emu_common::Protection;
+
+    let bytes = build_macho();
+    let cfg = MachineConfig::default();
+    let machine = Machine::load_bare(&cfg, &bytes, temp_sandbox()).expect("load");
+
+    for r in machine.mem.regions() {
+        let wx = r.prot.contains(Protection::WRITE) && r.prot.contains(Protection::EXEC);
+        assert!(!wx, "region {} is W^X-violating ({:?})", r.name, r.prot);
+    }
+
+    // And specifically: __TEXT is executable, not writable.
+    let text = machine.mem.regions().find(|r| r.name == "__TEXT").expect("__TEXT mapped");
+    assert!(text.prot.contains(Protection::EXEC));
+    assert!(!text.prot.contains(Protection::WRITE));
+}

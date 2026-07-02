@@ -79,8 +79,12 @@ pub fn build_process(
         } else {
             &[]
         };
-        // Map writable so dyld binds can be applied; downgraded below.
-        let load_prot = Protection(seg.initprot.0 | Protection::WRITE.0);
+        // W^X: load every segment as rw- — never request execute and write at
+        // the same time. Executable segments (e.g. __TEXT r-x) are flipped to
+        // their final protection in step 4, after file data and dyld binds have
+        // landed. A simultaneous rwx mapping is rejected by Android 16 / modern
+        // ARM64 kernels and faults with SEGV_ACCERR on first access.
+        let load_prot = Protection::rw();
         mem.map_with_data(base, seg.vmsize, data, load_prot, RegionKind::Segment, &seg.name)?;
         seg_runtime.push(Some(base));
     }
@@ -127,11 +131,14 @@ pub fn build_process(
     }
 
     // ---- 3. Publish the trampoline page ------------------------------------
+    // W^X: map the stub page rw- to write the BRK sleds, then flip to r-x below
+    // — never rwx. (Writing while mapped r-x would also fail the abstraction's
+    // protection check, silently leaving the page un-filled.)
     let tramp_bytes = align_up(resolver.used().max(PAGE_SIZE), PAGE_SIZE);
     mem.map(
         cfg.trampoline_base,
         tramp_bytes,
-        Protection::rx(),
+        Protection::rw(),
         RegionKind::Segment,
         "__stubs",
     )?;
@@ -139,10 +146,12 @@ pub fn build_process(
     {
         let mut off = 0;
         while off < tramp_bytes {
-            let _ = mem.write_u32(cfg.trampoline_base + off, AARCH64_BRK0);
+            mem.write_u32(cfg.trampoline_base + off, AARCH64_BRK0)?;
             off += 4;
         }
     }
+    // Now executable-only.
+    mem.protect(cfg.trampoline_base, Protection::rx())?;
     let trampoline_end = cfg.trampoline_base + tramp_bytes;
 
     // ---- 4. Restore real segment protections -------------------------------

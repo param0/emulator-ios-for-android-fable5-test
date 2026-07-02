@@ -11,7 +11,10 @@
 //! remains the single source of truth for the *layout* and *contents*, and the
 //! executor mirrors regions marked [`Protection::EXEC`].
 
-#![forbid(unsafe_code)]
+// `deny` (not `forbid`) so the single, audited FFI call that applies real page
+// protections on device can opt in with `#[allow(unsafe_code)]`; everything else
+// stays unsafe-free.
+#![cfg_attr(not(test), deny(unsafe_code))]
 
 mod allocator;
 mod region;
@@ -21,6 +24,13 @@ pub use region::{Region, RegionKind};
 
 use ios_emu_common::{align_up, EmuError, EmuResult, GuestAddr, Protection, PAGE_SIZE};
 use std::collections::BTreeMap;
+
+// The native mprotect wrapper (native/src/vm_bridge.c). On device, `protect`
+// forwards to it so W^X is enforced by the kernel, not merely tracked here.
+#[cfg(target_os = "android")]
+extern "C" {
+    fn ios_emu_native_protect(addr: u64, len: usize, prot: u32) -> i32;
+}
 
 /// The full emulated address space for one iOS process.
 ///
@@ -114,9 +124,27 @@ impl GuestMemory {
     /// Change the protection of the region *containing* `addr`. (A full
     /// implementation would split regions on sub-range `mprotect`; iOS binaries
     /// almost always `mprotect` whole segments, which this handles.)
+    ///
+    /// On device this forwards to the C backend's `mprotect` wrapper so the final
+    /// protection (e.g. `r-x` for `__TEXT`) is enforced by the kernel — the
+    /// mechanism that makes the W^X load sequence (map `rw-`, copy, then flip to
+    /// `r-x`) actually take effect on the real pages.
+    #[cfg_attr(target_os = "android", allow(unsafe_code))]
     pub fn protect(&mut self, addr: GuestAddr, prot: Protection) -> EmuResult<()> {
         let base = self.region_base(addr)?;
-        self.regions.get_mut(&base).unwrap().prot = prot;
+        let region = self.regions.get_mut(&base).unwrap();
+        region.prot = prot;
+
+        #[cfg(target_os = "android")]
+        {
+            let len = region.size() as usize;
+            // SAFETY: FFI into our own mprotect wrapper; `base`/`len` describe a
+            // page-aligned region this manager owns and previously mapped.
+            let rc = unsafe { ios_emu_native_protect(base, len, prot.0 as u32) };
+            if rc != 0 {
+                return Err(EmuError::Memory { addr: base, reason: "native mprotect failed" });
+            }
+        }
         Ok(())
     }
 
